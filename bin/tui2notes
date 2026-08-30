@@ -124,8 +124,11 @@ def table_html(rows):
     if not rows:
         return ""
     head, body = rows[0], rows[1:]
-    o = ['<table border="1" cellspacing="0" cellpadding="6" '
-         'style="border-collapse:collapse;border:1px solid #b0b0b0;">']
+    # Only the cells carry borders. A border on the table itself survives the
+    # RTF conversion as a second, row-level border (\trbrdr*) drawn alongside
+    # the cell one (\clbrdr*), which Notes renders as a doubled line.
+    o = ['<table cellspacing="0" cellpadding="6" '
+         'style="border-collapse:collapse;">']
     o.append("<tr>" + "".join(
         f'<th style="border:1px solid #b0b0b0;background:#f0f0f0;'
         f'text-align:left;">{inline(c)}</th>' for c in head) + "</tr>")

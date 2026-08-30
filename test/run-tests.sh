@@ -62,6 +62,20 @@ check "prose kept above the table" "wider than the pane" < /tmp/tui2notes-deg.ht
 [ "$(grep -o '<table' /tmp/tui2notes-deg.html | wc -l | tr -d ' ')" = 1 ] \
   && echo "  ok   one table, not three" || { echo "  FAIL split into pieces"; fail=1; }
 
+echo "no doubled border in the RTF:"
+# A border on the <table> itself becomes a row-level border (\trbrdr*) that
+# macOS draws alongside the cell border (\clbrdr*) - two lines, not one.
+$BIN --html < examples/markdown-table.md \
+  | textutil -stdin -format html -convert rtf -stdout > /tmp/tui2notes-border.rtf
+if grep -qF 'trbrdrt\brdrs' /tmp/tui2notes-border.rtf; then
+  echo "  FAIL row-level top border is drawn as well as the cell border"; fail=1
+else
+  echo "  ok   only the cells carry borders"
+fi
+grep -qF 'clbrdrt\brdrs' /tmp/tui2notes-border.rtf \
+  && echo "  ok   cells still have borders" \
+  || { echo "  FAIL cell borders went missing"; fail=1; }
+
 echo "already-RTF guard:"
 out=$(printf '{\\rtf1\\ansi hello}' | $BIN 2>&1)
 grep -q "already rich text" <<<"$out" && echo "  ok   guard fires" \
