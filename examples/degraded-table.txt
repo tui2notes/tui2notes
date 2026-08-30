@@ -1,0 +1,11 @@
+A table wider than the pane: the terminal drops the right border on some
+rows, truncates the rules, and gives up on the box characters entirely for
+others.
+
+┌──────────┬────────────┬────────────
+│ latency  │ headroom   │ agents
+├──────────┼────────────┼────────────
+│ 200 ms   │ 0.35       │ 71
+500 ms    0.74    152
+│ 800 ms   │ 0.84       │ 172         │
+└──────────┴────────────┴─────────────┘

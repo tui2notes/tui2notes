@@ -38,17 +38,29 @@ echo "CJK line-join heuristic:"
 # A cell wrapped mid-number and mid-sentence: digits glue to the following
 # CJK unit, CJK glues to CJK, and a latin word keeps its space.
 cat > /tmp/tui2notes-cjk.txt <<'TBL'
-┌───────────────┐
-│ payload      │
-├───────────────┤
-│ 24.7         │
-│ KiB/行（26.4  │
-│ 万行）       │
-└───────────────┘
+┌────────────────┬──────────────────────┐
+│ table          │ measured             │
+├────────────────┼──────────────────────┤
+│                │ 24.7                 │
+│ event_payloads │ KiB/行（26.4          │
+│                │ 万行）                │
+├────────────────┼──────────────────────┤
+│ calls          │ 351 B/次              │
+└────────────────┴──────────────────────┘
 TBL
 $BIN --html < /tmp/tui2notes-cjk.txt > /tmp/tui2notes-cjk.html
 check "digit+CJK joins tight, latin keeps space" \
   "24.7 KiB/行（26.4万行）" < /tmp/tui2notes-cjk.html
+
+echo "degraded table (narrow pane):"
+$BIN --html < examples/degraded-table.txt > /tmp/tui2notes-deg.html
+check "row missing its right border" ">71</td>" < /tmp/tui2notes-deg.html
+check "row with no box characters at all" ">500 ms</td>" < /tmp/tui2notes-deg.html
+check "row with the border intact" ">172</td>" < /tmp/tui2notes-deg.html
+check "header survived" "<th" < /tmp/tui2notes-deg.html
+check "prose kept above the table" "wider than the pane" < /tmp/tui2notes-deg.html
+[ "$(grep -o '<table' /tmp/tui2notes-deg.html | wc -l | tr -d ' ')" = 1 ] \
+  && echo "  ok   one table, not three" || { echo "  FAIL split into pieces"; fail=1; }
 
 echo "already-RTF guard:"
 out=$(printf '{\\rtf1\\ansi hello}' | $BIN 2>&1)

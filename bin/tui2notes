@@ -87,6 +87,39 @@ def merge_rows(rows):
     return out
 
 
+ROW_SPLIT = re.compile(r"\t+|\s{2,}")
+LEAD_BORDER = re.compile(r"^[\u250c\u252c\u2510\u251c\u253c\u2524\u2514\u2534\u2518"
+                         r"\u2500\u2501\u2550+\-\s]*(?=[\u2502\u2503])")
+
+
+def parse_row(line):
+    """A physical line -> 'SEP', a list of cells, or None when it is prose.
+
+    Tolerates what a terminal does to a table too wide for the pane: a border
+    truncated and glued to the header, or box characters dropped entirely so
+    the columns are only separated by runs of spaces.
+    """
+    s = line.strip()
+    if not s:
+        return None
+    if is_border(s):
+        return "SEP"
+    if "\u2502" in s or "\u2503" in s:
+        s = LEAD_BORDER.sub("", s, count=1)
+        cells = [c.strip() for c in re.split(r"[\u2502\u2503]", s)]
+        if cells and not cells[0]:
+            cells.pop(0)
+        if cells and not cells[-1]:
+            cells.pop()
+        return cells or None          # one column is a legitimate table
+    cells = [c.strip() for c in ROW_SPLIT.split(s) if c.strip()]
+    return cells if len(cells) >= 2 else None
+
+
+def has_box(block):
+    return any("\u2502" in l or "\u2503" in l for l in block)
+
+
 def table_html(rows):
     if not rows:
         return ""
@@ -112,6 +145,54 @@ def inline(t):
     return t
 
 
+def emit_table_block(block, out, emit_line, flush):
+    """Render one block that contains box characters.
+
+    Rows are separated by horizontal rules when the table has them (a TUI wraps
+    long cells over several lines, and those rules are the only reliable row
+    boundary). A table with at most one rule - a header underline, say - is
+    read one row per line instead, so its rows are not collapsed together.
+    """
+    parsed = [(l, parse_row(l)) for l in block]
+    # A renderer that wraps a cell over several lines must draw a rule between
+    # every row - without one, a human could not tell a continuation from a new
+    # row either. So only rules *between data rows* (2+) enable merging.
+    inner_rules = max(0, sum(1 for _, r in parsed if r == "SEP") - 2)
+    merge = inner_rules >= 2
+
+    rows, buf, segs = [], [], []
+
+    def close_row():
+        if buf:
+            rows.append(merge_rows(buf))
+            buf.clear()
+
+    def close_table():
+        close_row()
+        if rows:
+            segs.append(("table", list(rows)))
+            rows.clear()
+
+    for raw, r in parsed:
+        if r == "SEP":
+            close_row()
+        elif r is None:                      # prose in the middle of a table
+            close_table()
+            segs.append(("prose", raw.strip()))
+        elif merge:
+            buf.append(r)
+        else:
+            rows.append(r)
+    close_table()
+
+    for kind, payload in segs:
+        if kind == "table":
+            flush()                  # pending prose goes out before the table
+            out.append(table_html(payload))
+        else:
+            emit_line(payload)
+
+
 def convert(text):
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out, i, n = [], 0, len(lines)
@@ -122,25 +203,26 @@ def convert(text):
             out.append("<p>" + "<br>".join(inline(p) for p in para) + "</p>")
             para.clear()
 
+    def emit_line(s):
+        """A single non-table line: heading, list item, or paragraph text."""
+        if re.match(r"^#{1,6}\s", s):
+            flush()
+            lv = min(len(s) - len(s.lstrip("#")), 4)
+            out.append(f"<h{lv}>{inline(s.lstrip('#').strip())}</h{lv}>")
+        elif re.match(r"^([-*\u2022]|\d+[.)])\s", s):
+            flush()
+            m = re.match(r"^([-*\u2022]|\d+[.)])\s+", s)
+            mark = "\u2022" if m.group(1) in "-*\u2022" else m.group(1)
+            out.append(f"<p>{mark} " + inline(s[m.end():]) + "</p>")
+        else:
+            para.append(s)
+
     while i < n:
         line = lines[i]
 
-        # -- box-drawing table --------------------------------------
-        if is_border(line) and i + 1 < n and is_box_row(lines[i + 1]):
+        if not line.strip():
             flush()
-            rows, buf = [], []
             i += 1
-            while i < n and (is_box_row(lines[i]) or is_border(lines[i])):
-                if is_border(lines[i]):
-                    if buf:
-                        rows.append(merge_rows(buf))
-                        buf = []
-                else:
-                    buf.append(split_cells(lines[i]))
-                i += 1
-            if buf:
-                rows.append(merge_rows(buf))
-            out.append(table_html(rows))
             continue
 
         # -- markdown pipe table ------------------------------------
@@ -154,21 +236,21 @@ def convert(text):
             out.append(table_html(rows))
             continue
 
-        s = line.strip()
-        if not s:
+        # -- a block holding box characters: parse the whole block ---
+        j = i
+        while j < n and lines[j].strip():
+            j += 1
+        block = lines[i:j]
+        if has_box(block):
             flush()
-        elif re.match(r"^#{1,6}\s", s):
+            emit_table_block(block, out, emit_line, flush)
             flush()
-            lv = len(s) - len(s.lstrip("#"))
-            out.append(f"<h{min(lv,4)}>{inline(s.lstrip('#').strip())}</h{min(lv,4)}>")
-        elif re.match(r"^([-*•]|\d+[.)])\s", s):
-            flush()
-            m = re.match(r"^([-*•]|\d+[.)])\s+", s)
-            mark = "•" if m.group(1) in "-*•" else m.group(1)
-            out.append(f"<p>{mark} " + inline(s[m.end():]) + "</p>")
-        else:
-            para.append(s)
+            i = j
+            continue
+
+        emit_line(line.strip())
         i += 1
+
     flush()
     return ('<meta charset="utf-8"><body style="font-family:-apple-system,'
             'Helvetica;font-size:13px;">' + "".join(out) + "</body>")
