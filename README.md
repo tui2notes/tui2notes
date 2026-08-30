@@ -31,41 +31,46 @@ git clone https://github.com/thomaslwang/tui2notes
 cd tui2notes && ./install.sh
 ```
 
-That puts the `tui2notes` CLI in `~/.local/bin` and a clickable
-`tui2notes.app` in `/Applications`. No dependencies beyond what ships with
-macOS (`python3`, `textutil`, `pbpaste`, `osascript`).
+Installs the `tui2notes` CLI into `~/.local/bin` and a small menu-bar agent
+into `/Applications`, started at login through a LaunchAgent. Nothing beyond
+what ships with macOS is required at runtime (`python3`, `textutil`,
+`osascript`); building the agent needs the Xcode Command Line Tools.
 
 ## Use
 
-**From the terminal** — copy the table, then:
+**Just copy and paste.** The agent watches the clipboard. When a copy looks
+like a table it rewrites the clipboard in place, so ⌘C and ⌘V stay exactly
+what they were:
+
+- paste into **Notes, Pages, Mail** -> a native table
+- paste into a **terminal or editor** -> the original text, untouched
+
+Both flavours are on the clipboard at once, so nothing is lost either way.
+Text that is not a table is left alone; so is anything copied out of a
+rich-text app.
+
+The menu-bar icon toggles the watcher off, converts the clipboard on demand,
+and shows how many tables it has converted.
+
+**From the terminal**, without the agent:
 
 ```sh
-tui2notes          # convert the clipboard; now just ⌘V in Notes
+tui2notes                    # convert whatever is on the clipboard
+tui2notes --newnote < r.md   # skip the clipboard: create a new Apple Note
+tui2notes --html             # print the intermediate HTML
 ```
-
-**From the Dock** — drag `tui2notes.app` there and click it after copying.
-It converts the clipboard, brings Notes forward and pastes for you.
-
-**Straight into a new note** — no clipboard round-trip:
-
-```sh
-tui2notes --newnote < report.md
-```
-
-Other flags: `--html` prints the intermediate HTML, `--help` explains itself.
 
 ## Permissions
 
-| What you click | Needs | If denied |
-|---|---|---|
-| `tui2notes` in a terminal | nothing | — |
-| `tui2notes.app` | Automation (Notes) | it reports the error |
-| …to paste at the cursor | Accessibility | falls back to creating a new note |
+The agent needs **none**. It synthesises no keystrokes and scripts no apps —
+it only reads and writes the pasteboard, which macOS does not gate.
 
-The Accessibility requirement comes from synthesising ⌘V. Grant it under
-**System Settings → Privacy & Security → Accessibility**, or just live with
-the fallback — `--newnote` needs no such permission because it hands the HTML
-to Notes directly.
+Two optional extras do need permission, and neither is installed by default:
+
+| Extra | Needs |
+|---|---|
+| `--newnote` | Automation (Notes) |
+| `./install.sh --applet` — click to paste at the cursor | Accessibility |
 
 ## Notes on the implementation
 
@@ -81,9 +86,11 @@ Three things are less obvious than they look:
   must become `24.7 KiB/行（26.4万行）`: a space between latin tokens, none
   between a digit and a CJK unit, none between two CJK characters.
 
-Once converted, the clipboard holds RTF whose *plain-text* flavour is the RTF
-source. Running the tool twice would therefore try to convert `{\rtf1…`, so it
-detects that and stops.
+- **A pasteboard can hold several flavours at once.** The agent writes
+  `public.rtf` *and* `public.utf8-plain-text`, so the same ⌘C serves both a
+  word processor and a terminal. The CLI, older and simpler, replaces the
+  clipboard with RTF alone; its plain-text flavour is then the RTF source, so
+  it refuses to convert a second time.
 
 ## Optional: a Services entry
 
@@ -102,7 +109,8 @@ will not give you a right-click item there.
 bash test/run-tests.sh
 ```
 
-Parser only — no clipboard, no GUI, no permissions.
+Parser only — no clipboard, no GUI, no permissions. Run the agent with
+`TUI2NOTES_DEBUG=1` to trace what it decides about each copy.
 
 ## License
 
