@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+tui2notes — turn terminal-rendered tables into rich text macOS apps understand.
+
+Terminal UIs (Claude Code, gh, psql, ...) draw tables as monospace box art.
+Pasting that into Apple Notes / Pages / Mail breaks the alignment, because
+those apps use a proportional font. This tool re-parses the box art (or a
+Markdown pipe table) into a real table and puts RTF on the clipboard, so a
+plain Cmd-V produces a native table.
+
+Usage:
+    tui2notes                 # convert the clipboard, put RTF back on it
+    tui2notes < file.md       # read from stdin instead
+    tui2notes --newnote       # skip the clipboard: create a new Apple Note
+    tui2notes --html          # print the intermediate HTML and exit
+"""
+import html
+import re
+import subprocess
+import sys
+
+BOX_V = "│┃|"
+BORDER_CHARS = set("┌┬┐├┼┤└┴┘─━┏┳┓┣╋┫┗┻┛╔╦╗╠╬╣╚╩╝═+-")
+
+
+def is_border(line):
+    s = line.strip()
+    if not s:
+        return False
+    return all(c in BORDER_CHARS or c.isspace() for c in s) and any(
+        c in "─━═-" for c in s
+    )
+
+
+def is_box_row(line):
+    s = line.strip()
+    return len(s) > 1 and s[0] in "│┃" and s[-1] in "│┃"
+
+
+def is_md_row(line):
+    s = line.strip()
+    return s.startswith("|") and s.endswith("|") and len(s) > 1
+
+
+def is_md_sep(line):
+    s = line.strip()
+    if not (s.startswith("|") and s.endswith("|")):
+        return False
+    body = s.strip("|")
+    return bool(body) and all(c in " -:|" for c in body) and "-" in body
+
+
+def split_cells(line):
+    s = line.strip()
+    parts = re.split(r"[│┃|]", s)
+    return [p.strip() for p in parts[1:-1]]
+
+
+def _cjk(ch):
+    return ord(ch) > 0x2E00
+
+
+def join_frag(acc, frag):
+    """Re-join a cell that the TUI wrapped across several lines."""
+    if not acc:
+        return frag
+    if not frag:
+        return acc
+    a, b = acc[-1], frag[0]
+    if _cjk(a) and _cjk(b):
+        return acc + frag              # CJK + CJK: never insert a space
+    if a.isdigit() or a in ".%":
+        if _cjk(b):
+            return acc + frag          # digit + CJK unit: "26.4" + "MB" style
+    return acc + " " + frag            # otherwise keep one space
+
+
+def merge_rows(rows):
+    """rows: cells of consecutive physical lines -> one logical row."""
+    width = max(len(r) for r in rows)
+    out = [""] * width
+    for r in rows:
+        for i, c in enumerate(r):
+            if c:
+                out[i] = join_frag(out[i], c)
+    return out
+
+
+def table_html(rows):
+    if not rows:
+        return ""
+    head, body = rows[0], rows[1:]
+    o = ['<table border="1" cellspacing="0" cellpadding="6" '
+         'style="border-collapse:collapse;border:1px solid #b0b0b0;">']
+    o.append("<tr>" + "".join(
+        f'<th style="border:1px solid #b0b0b0;background:#f0f0f0;'
+        f'text-align:left;">{inline(c)}</th>' for c in head) + "</tr>")
+    for r in body:
+        r = r + [""] * (len(head) - len(r))
+        o.append("<tr>" + "".join(
+            f'<td style="border:1px solid #b0b0b0;vertical-align:top;">'
+            f"{inline(c)}</td>" for c in r) + "</tr>")
+    o.append("</table>")
+    return "".join(o)
+
+
+def inline(t):
+    t = html.escape(t)
+    t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
+    t = re.sub(r"`([^`]+)`", r'<code style="font-family:Menlo,monospace;">\1</code>', t)
+    return t
+
+
+def convert(text):
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out, i, n = [], 0, len(lines)
+    para = []
+
+    def flush():
+        if para:
+            out.append("<p>" + "<br>".join(inline(p) for p in para) + "</p>")
+            para.clear()
+
+    while i < n:
+        line = lines[i]
+
+        # -- box-drawing table --------------------------------------
+        if is_border(line) and i + 1 < n and is_box_row(lines[i + 1]):
+            flush()
+            rows, buf = [], []
+            i += 1
+            while i < n and (is_box_row(lines[i]) or is_border(lines[i])):
+                if is_border(lines[i]):
+                    if buf:
+                        rows.append(merge_rows(buf))
+                        buf = []
+                else:
+                    buf.append(split_cells(lines[i]))
+                i += 1
+            if buf:
+                rows.append(merge_rows(buf))
+            out.append(table_html(rows))
+            continue
+
+        # -- markdown pipe table ------------------------------------
+        if is_md_row(line) and i + 1 < n and is_md_sep(lines[i + 1]):
+            flush()
+            rows = [split_cells(line)]
+            i += 2
+            while i < n and is_md_row(lines[i]):
+                rows.append(split_cells(lines[i]))
+                i += 1
+            out.append(table_html(rows))
+            continue
+
+        s = line.strip()
+        if not s:
+            flush()
+        elif re.match(r"^#{1,6}\s", s):
+            flush()
+            lv = len(s) - len(s.lstrip("#"))
+            out.append(f"<h{min(lv,4)}>{inline(s.lstrip('#').strip())}</h{min(lv,4)}>")
+        elif re.match(r"^([-*•]|\d+[.)])\s", s):
+            flush()
+            m = re.match(r"^([-*•]|\d+[.)])\s+", s)
+            mark = "•" if m.group(1) in "-*•" else m.group(1)
+            out.append(f"<p>{mark} " + inline(s[m.end():]) + "</p>")
+        else:
+            para.append(s)
+        i += 1
+    flush()
+    return ('<meta charset="utf-8"><body style="font-family:-apple-system,'
+            'Helvetica;font-size:13px;">' + "".join(out) + "</body>")
+
+
+NEWNOTE_AS = r'''
+on run argv
+    set theHTML to item 1 of argv
+    tell application id "com.apple.Notes"
+        set n to make new note with properties {body:theHTML}
+        activate
+        show n
+    end tell
+end run
+'''
+
+
+def new_note(doc):
+    """No synthetic keystroke: hand the HTML to Notes, which renders
+    it as a native note (tables included)."""
+    import tempfile, os
+    f = tempfile.NamedTemporaryFile("w", suffix=".applescript",
+                                    delete=False, encoding="utf-8")
+    f.write(NEWNOTE_AS)
+    f.close()
+    r = subprocess.run(["osascript", f.name, doc], capture_output=True)
+    os.unlink(f.name)
+    if r.returncode != 0:
+        sys.exit("could not create the note: " + r.stderr.decode().strip())
+    print("Created a new note in Notes (tables are native tables).")
+
+
+def main():
+    argv = sys.argv[1:]
+    if "-h" in argv or "--help" in argv:
+        print(__doc__.strip())
+        return
+    unknown = [a for a in argv
+               if a not in ("--html", "--newnote", "-n", "-h", "--help")]
+    if unknown:
+        sys.exit("unknown option: " + " ".join(unknown) + "\n(try --help)")
+    only_html = "--html" in argv
+    src = ""
+    if not sys.stdin.isatty():
+        try:
+            src = sys.stdin.read()
+        except Exception:
+            src = ""
+    if not src.strip():          # empty pipe (e.g. run from a Shortcut) -> use the clipboard
+        src = subprocess.run(["pbpaste"], capture_output=True,
+                             text=True).stdout
+    if not src.strip():
+        sys.exit("nothing on the clipboard and nothing on stdin")
+    if src.lstrip().startswith("{\\rtf"):   # converted already; do not convert the RTF source again
+        print("Clipboard is already rich text - nothing to do, just paste.")
+        return
+    doc = convert(src)
+    if only_html:
+        print(doc)
+        return
+    if "--newnote" in argv or "-n" in argv:
+        new_note(doc)
+        return
+    import tempfile, os
+    tmp = tempfile.NamedTemporaryFile(suffix=".rtf", delete=False)
+    tmp.close()
+    r = subprocess.run(
+        ["textutil", "-stdin", "-format", "html", "-convert", "rtf",
+         "-output", tmp.name],
+        input=doc.encode(), capture_output=True)
+    if r.returncode != 0 or not os.path.getsize(tmp.name):
+        sys.exit("textutil failed: " + r.stderr.decode())
+    # pbcopy would file the RTF as plain text; the pasteboard needs the
+    # RTF flavour set explicitly, which only osascript can do here.
+    a = subprocess.run(
+        ["osascript", "-e",
+         f'set the clipboard to (read POSIX file "{tmp.name}" as \u00abclass RTF \u00bb)'],
+        capture_output=True)
+    os.unlink(tmp.name)
+    if a.returncode != 0:
+        sys.exit("could not write to the clipboard: " + a.stderr.decode())
+    ntab = doc.count("<table")
+    print(f"Rich text on the clipboard ({ntab} table(s)) - paste with Cmd-V.")
+
+
+if __name__ == "__main__":
+    main()
