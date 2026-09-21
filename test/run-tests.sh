@@ -62,6 +62,28 @@ check "prose kept above the table" "wider than the pane" < /tmp/tui2notes-deg.ht
 [ "$(grep -o '<table' /tmp/tui2notes-deg.html | wc -l | tr -d ' ')" = 1 ] \
   && echo "  ok   one table, not three" || { echo "  FAIL split into pieces"; fail=1; }
 
+echo "table whose header scrolled off the top:"
+# A pane too narrow to hold the table: the copy starts mid-table, so there is
+# no header row to promote and no "# " line to mistake for a heading.
+cat > /tmp/tui2notes-cut.txt <<'TBL'
+mcd 的两个包
+
+│ .tar.gz）  │ 4e56e2a9d87.enc │ fcYFYQ │
+└────────────┴─────────────────┴────────┘
+
+# 部署包
+curl -fsSLO https://example.invalid/pkg.enc
+TBL
+$BIN --html < /tmp/tui2notes-cut.txt > /tmp/tui2notes-cut.html
+check "surviving row stays a data row" ">4e56e2a9d87.enc</td>" < /tmp/tui2notes-cut.html
+grep -qF "<th" /tmp/tui2notes-cut.html \
+  && { echo "  FAIL invented a header out of a data row"; fail=1; } \
+  || echo "  ok   no header invented"
+grep -qF "<h1>" /tmp/tui2notes-cut.html \
+  && { echo "  FAIL shell comment set as a heading"; fail=1; } \
+  || echo "  ok   '# 部署包' left as snippet text"
+check "text below the table survives" "curl -fsSLO" < /tmp/tui2notes-cut.html
+
 echo "no doubled border in the RTF:"
 # A border on the <table> itself becomes a row-level border (\trbrdr*) that
 # macOS draws alongside the cell border (\clbrdr*) - two lines, not one.

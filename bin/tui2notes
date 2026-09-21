@@ -120,20 +120,29 @@ def has_box(block):
     return any("\u2502" in l or "\u2503" in l for l in block)
 
 
-def table_html(rows):
+def table_html(rows, header=True):
+    """header=False when the table's own header row is not in the text.
+
+    A pane too narrow scrolls the top of a table away, so what was copied
+    starts mid-table. Promoting whatever row survived to a header would
+    invent one - it prints a data row bold on grey and drops it out of the
+    body."""
     if not rows:
         return ""
-    head, body = rows[0], rows[1:]
+    width = max(len(r) for r in rows)
+    head, body = (rows[0], rows[1:]) if header else (None, rows)
     # Only the cells carry borders. A border on the table itself survives the
     # RTF conversion as a second, row-level border (\trbrdr*) drawn alongside
     # the cell one (\clbrdr*), which Notes renders as a doubled line.
     o = ['<table cellspacing="0" cellpadding="6" '
          'style="border-collapse:collapse;">']
-    o.append("<tr>" + "".join(
-        f'<th style="border:1px solid #b0b0b0;background:#f0f0f0;'
-        f'text-align:left;">{inline(c)}</th>' for c in head) + "</tr>")
+    if head is not None:
+        head = head + [""] * (width - len(head))
+        o.append("<tr>" + "".join(
+            f'<th style="border:1px solid #b0b0b0;background:#f0f0f0;'
+            f'text-align:left;">{inline(c)}</th>' for c in head) + "</tr>")
     for r in body:
-        r = r + [""] * (len(head) - len(r))
+        r = r + [""] * (width - len(r))
         o.append("<tr>" + "".join(
             f'<td style="border:1px solid #b0b0b0;vertical-align:top;">'
             f"{inline(c)}</td>" for c in r) + "</tr>")
@@ -164,6 +173,7 @@ def emit_table_block(block, out, emit_line, flush):
     merge = inner_rules >= 2
 
     rows, buf, segs = [], [], []
+    top_rule = [False]      # did a rule stand above this table's first row?
 
     def close_row():
         if buf:
@@ -173,25 +183,30 @@ def emit_table_block(block, out, emit_line, flush):
     def close_table():
         close_row()
         if rows:
-            segs.append(("table", list(rows)))
+            segs.append(("table", list(rows), top_rule[0]))
             rows.clear()
+        top_rule[0] = False
 
     for raw, r in parsed:
         if r == "SEP":
+            # A table that opens with a row, not a rule, was cut off above:
+            # its header is gone, so the first surviving row is data.
+            if not rows and not buf:
+                top_rule[0] = True
             close_row()
         elif r is None:                      # prose in the middle of a table
             close_table()
-            segs.append(("prose", raw.strip()))
+            segs.append(("prose", raw.strip(), False))
         elif merge:
             buf.append(r)
         else:
             rows.append(r)
     close_table()
 
-    for kind, payload in segs:
+    for kind, payload, header in segs:
         if kind == "table":
             flush()                  # pending prose goes out before the table
-            out.append(table_html(payload))
+            out.append(table_html(payload, header))
         else:
             emit_line(payload)
 
@@ -206,9 +221,15 @@ def convert(text):
             out.append("<p>" + "<br>".join(inline(p) for p in para) + "</p>")
             para.clear()
 
-    def emit_line(s):
-        """A single non-table line: heading, list item, or paragraph text."""
-        if re.match(r"^#{1,6}\s", s):
+    def emit_line(s, alone=False):
+        """A single non-table line: heading, list item, or paragraph text.
+
+        alone: the line is the whole paragraph. A Markdown heading stands on
+        its own; a "# ..." that opens a run of unbroken lines is the comment
+        at the top of a shell snippet, and setting it 26pt bold is worse than
+        leaving it as the text it is.
+        """
+        if alone and re.match(r"^#{1,6}\s", s):
             flush()
             lv = min(len(s) - len(s.lstrip("#")), 4)
             out.append(f"<h{lv}>{inline(s.lstrip('#').strip())}</h{lv}>")
@@ -251,7 +272,7 @@ def convert(text):
             i = j
             continue
 
-        emit_line(line.strip())
+        emit_line(line.strip(), alone=len(block) == 1)
         i += 1
 
     flush()
